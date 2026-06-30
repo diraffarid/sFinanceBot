@@ -1,0 +1,18 @@
+services:
+  - type: worker
+    name: telegram-finance-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: SHEET_ID
+        sync: false
+      - key: SHEET_NAME
+        value: Transaksi
+      - key: GOOGLE_CREDENTIALS_JSON
+        sync: false
