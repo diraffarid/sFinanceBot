@@ -1,11 +1,13 @@
 services:
-  - type: worker
+  - type: web
     name: telegram-finance-bot
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
+      - key: RUN_MODE
+        value: webhook
       - key: TELEGRAM_TOKEN
         sync: false
       - key: GROQ_API_KEY

@@ -26,6 +26,14 @@ SHEET_ID = os.environ["SHEET_ID"]                   # ID Google Sheet
 SHEET_NAME = os.environ.get("SHEET_NAME", "Transaksi")
 SERVICE_ACCOUNT_FILE = os.environ.get("SERVICE_ACCOUNT_FILE", "credentials.json")
 
+# Mode jalan: "webhook" (untuk hosting seperti Render) atau "polling" (lokal)
+RUN_MODE = os.environ.get("RUN_MODE", "polling").lower()
+# URL publik service (wajib untuk webhook), contoh: https://namabot.onrender.com
+# Di Render bisa pakai RENDER_EXTERNAL_URL yang otomatis tersedia.
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL", "")
+# Port yang didengarkan (Render menyediakan PORT otomatis)
+PORT = int(os.environ.get("PORT", "10000"))
+
 # Model AI gratis dari Groq
 TEXT_MODEL = "llama-3.3-70b-versatile"
 VISION_MODEL = "llama-3.2-90b-vision-preview"
@@ -344,8 +352,27 @@ def main():
     app.add_handler(CommandHandler("laporan_semua", laporan_semua))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    logger.info("Bot berjalan...")
-    app.run_polling()
+
+    if RUN_MODE == "webhook":
+        if not WEBHOOK_URL:
+            raise RuntimeError(
+                "RUN_MODE=webhook tapi WEBHOOK_URL/RENDER_EXTERNAL_URL kosong. "
+                "Set WEBHOOK_URL ke URL publik service Anda."
+            )
+        # Pakai token sebagai path rahasia agar endpoint tidak mudah ditebak.
+        url_path = TELEGRAM_TOKEN
+        full_url = f"{WEBHOOK_URL.rstrip('/')}/{url_path}"
+        logger.info("Bot mode WEBHOOK di %s (port %s)", full_url, PORT)
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=url_path,
+            webhook_url=full_url,
+            allowed_updates=Update.ALL_TYPES,
+        )
+    else:
+        logger.info("Bot mode POLLING...")
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
