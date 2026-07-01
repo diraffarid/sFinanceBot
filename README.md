@@ -47,11 +47,25 @@ Bot aktif → buka chat bot Anda di Telegram → ketik `/start`.
 
 ---
 
-## 📋 Struktur kolom Sheet
-| Tanggal | Jenis | Keterangan | Qty | Harga Satuan | Total | Sumber |
-|---------|-------|-----------|-----|--------------|-------|--------|
+## 📋 Struktur Sheet
+Bot mencatat ke 3 tab terpisah sesuai jenis transaksi:
 
-Header dibuat otomatis saat pertama kali jalan.
+**Pemasukan**
+| Tanggal | Waktu | Kategori | Tipe/Produk | Jumlah | Harga Satuan | Total | Keterangan | Bulan |
+|---------|-------|----------|-------------|--------|--------------|-------|-----------|-------|
+
+**Pengeluaran**
+| Tanggal | Waktu | Kategori | Nominal | Keterangan | Bulan |
+|---------|-------|----------|---------|-----------|-------|
+
+**Modal**
+| Tanggal | Waktu | Nominal | Keterangan | Bulan |
+|---------|-------|---------|-----------|-------|
+
+Kategori untuk Pemasukan/Pengeluaran dipilih otomatis oleh AI dari daftar di tab
+**Pengaturan** (`Kategori Pemasukan` / `Kategori Pengeluaran`). Tab tersebut juga
+yang dipakai untuk merekap di tab **Ringkasan**. Jika tab Pemasukan/Pengeluaran/Modal
+belum ada, bot membuatnya otomatis dengan header di atas.
 
 ## 💬 Contoh penggunaan
 | Kirim ke bot | Hasil |
