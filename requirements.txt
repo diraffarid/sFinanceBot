@@ -3,3 +3,4 @@ gspread==6.1.2
 google-auth==2.35.0
 groq==0.11.0
 httpx<0.28
+Pillow
