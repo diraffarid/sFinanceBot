@@ -8,6 +8,7 @@ import base64
 import io
 from datetime import datetime, timedelta
 
+import httpx
 import gspread
 from google.oauth2.service_account import Credentials
 from PIL import Image, ImageDraw, ImageFont
@@ -249,7 +250,9 @@ def insert_transaction(data: dict):
             harga_val = _to_float(harga_satuan) or (_to_float(total) / qty_val if qty_val else 0.0)
             profit = (harga_val - hpp_satuan) * qty_val
         ws = get_worksheet(TAB_PEMASUKAN, HEADERS_PEMASUKAN)
-        row = [tanggal, waktu, kategori, keterangan, qty, harga_satuan, total, "", bulan, data.get("id_transaksi", ""), profit]
+        tipe_produk = data.get("tipe_produk", keterangan)
+        keterangan_full = data.get("keterangan_full", "")
+        row = [tanggal, waktu, kategori, tipe_produk, qty, harga_satuan, total, keterangan_full, bulan, data.get("id_transaksi", ""), profit]
     elif jenis == "keluar":
         ws = get_worksheet(TAB_PENGELUARAN, HEADERS_PENGELUARAN)
         row = [tanggal, waktu, kategori, total, keterangan, bulan]
@@ -534,6 +537,33 @@ def parse_invoice_items(text: str):
     return items, errors
 
 
+def format_kontak(*parts) -> str:
+    """Gabungkan nama/alamat/no hp dengan ' | ', skip bagian yang kosong."""
+    return " | ".join(p.strip() for p in parts if p and p.strip())
+
+
+def split_header_and_items(text: str):
+    """Pisahkan pesan satu-langkah jadi (header_lines, items_text, ongkir).
+    Baris item diawali -, • atau *. Baris "ongkir <angka>" ditangkap terpisah.
+    Baris lain dianggap header (nama/alamat/no hp dsb)."""
+    header_lines = []
+    item_lines = []
+    ongkir = 0.0
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if re.match(r"^[-•*]\s*", line):
+            item_lines.append(line)
+            continue
+        m = re.match(r"(?i)^ongkir\s*[:\-]?\s*([\d.,]+)$", line)
+        if m:
+            ongkir = _to_float(m.group(1))
+        else:
+            header_lines.append(line)
+    return header_lines, "\n".join(item_lines), ongkir
+
+
 def next_invoice_no(ws) -> str:
     count = len(ws.get_all_values()) - 1  # kurangi baris header
     return f"{max(count, 0) + 1:04d}"
@@ -641,16 +671,44 @@ def _text_w(draw, text, font):
     return draw.textbbox((0, 0), text, font=font)[2]
 
 
+def fetch_logo_image(url: str, max_h: int = 100):
+    """Ambil gambar logo toko dari URL, resize supaya tinggi maksimal max_h. None jika gagal."""
+    try:
+        resp = httpx.get(url, timeout=10, follow_redirects=True)
+        resp.raise_for_status()
+        img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
+        w, h = img.size
+        if h > max_h:
+            ratio = max_h / h
+            img = img.resize((max(int(w * ratio), 1), max_h))
+        return img
+    except Exception:
+        logger.exception("Gagal ambil logo toko dari %s", url)
+        return None
+
+
+def _draw_username(draw, W, text_y, username, font, color):
+    """Gambar username (dengan @ di depan jika belum ada), ditengahkan secara horizontal di lebar W."""
+    label = username if username.startswith("@") else f"@{username}"
+    w = _text_w(draw, label, font)
+    draw.text(((W - w) / 2, text_y), label, font=font, fill=color)
+
+
 def generate_invoice_image(data: dict) -> io.BytesIO:
     info = get_info_toko()
     items = data["items"]
+
+    logo_url = info.get("Logo URL", "").strip()
+    logo_img = fetch_logo_image(logo_url, max_h=150) if logo_url else None
+    username = info.get("Username", "").strip()
 
     W = 960
     margin = 40
     card_x0, card_x1 = margin, W - margin
     row_h = 60
     table_rows_h = row_h * max(len(items), 1)
-    H = 980 + table_rows_h
+    header_h = (logo_img.size[1] + 40 + (36 if username else 0)) if logo_img else 160
+    H = 820 + header_h + table_rows_h
 
     bg = (235, 235, 235)
     white = (255, 255, 255)
@@ -664,7 +722,7 @@ def generate_invoice_image(data: dict) -> io.BytesIO:
     draw = ImageDraw.Draw(img)
 
     f_brand = get_font(40, bold=True)
-    f_handle = get_font(18)
+    f_handle = get_font(20, bold=True)
     f_label = get_font(18)
     f_bold = get_font(22, bold=True)
     f_title = get_font(52, bold=True)
@@ -679,15 +737,19 @@ def generate_invoice_image(data: dict) -> io.BytesIO:
 
     y = 30
     # Header card (logo/nama toko)
-    header_h = 160
     draw.rectangle([card_x0, y, card_x1, y + header_h], fill=white)
-    nama_toko = info.get("Nama Toko", "Toko Saya")
-    w = _text_w(draw, nama_toko, f_brand)
-    draw.text(((W - w) / 2, y + 60), nama_toko, font=f_brand, fill=black)
-    username = info.get("Username", "")
-    if username:
-        w = _text_w(draw, username, f_handle)
-        draw.text(((W - w) / 2, y + 115), username, font=f_handle, fill=gray_text)
+    if logo_img:
+        lw, lh = logo_img.size
+        logo_y = y + 20
+        img.paste(logo_img, (int((W - lw) / 2), int(logo_y)), logo_img)
+        if username:
+            _draw_username(draw, W, logo_y + lh + 10, username, f_handle, gray_text)
+    else:
+        nama_toko = info.get("Nama Toko", "Toko Saya")
+        w = _text_w(draw, nama_toko, f_brand)
+        draw.text(((W - w) / 2, y + 60), nama_toko, font=f_brand, fill=black)
+        if username:
+            _draw_username(draw, W, y + 115, username, f_handle, gray_text)
     y += header_h + 30
 
     # Kepada / Tagihan
@@ -964,12 +1026,12 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
-        ["💰 Pemasukan", "🛒 Pengeluaran"],
+        ["➕ Input Transaksi", "🛒 Pengeluaran"],
         ["🏦 Modal", "💼 Saldo"],
         ["📊 Lap. Hari Ini", "📅 Lap. Minggu"],
         ["🗓️ Lap. Bulan", "🧾 Panduan Struk"],
         ["📄 Cek Laporan", "🧾 Buat Invoice"],
-        ["➕ Input Transaksi", "⚙️ Atur HPP"],
+        ["💰 Pemasukan", "⚙️ Atur HPP"],
     ],
     resize_keyboard=True,
 )
@@ -1130,9 +1192,18 @@ async def quick_cek_laporan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["invoice_flow"] = {"step": "penerima", "data": {}}
+    context.user_data["invoice_flow"] = {"step": "all", "data": {}}
     await update.message.reply_text(
-        "🧾 *Buat Invoice Baru*\n\nSiapa nama penerima? (ketik /batal untuk membatalkan)",
+        "🧾 *Buat Invoice Baru*\n\n"
+        "Kirim dalam satu pesan. Baris pertama nama/alamat/no hp penerima "
+        "(pisah dengan /, semua opsional), lalu baris item diawali \"-\".\n\n"
+        "Contoh:\n"
+        "Farid / Perum Riung Duta / 081224663400\n"
+        "- bolu ketan hitam L 1 65000\n"
+        "- fudgy brownies mix 2\n\n"
+        "(harga boleh dikosongkan jika sudah diatur di ⚙️ Atur HPP; tambahkan baris "
+        "\"ongkir 10000\" jika ada ongkir)\n\n"
+        "Ketik /batal untuk membatalkan.",
         parse_mode="Markdown",
     )
 
@@ -1156,53 +1227,34 @@ async def handle_invoice_flow(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Invoice dibatalkan.", reply_markup=MAIN_KEYBOARD)
         return
 
-    step = flow["step"]
+    header_lines, items_text, ongkir = split_header_and_items(text)
+    items, errors = parse_invoice_items(items_text)
+    if errors:
+        await update.message.reply_text("\n".join(errors))
+        return
+    if not items:
+        await update.message.reply_text(
+            "⚠️ Tidak ada item terbaca. Baris item diawali \"-\".\nContoh: - bolu ketan hitam L 1 65000"
+        )
+        return
+
+    parts = [p.strip() for p in header_lines[0].split("/")] if header_lines else []
+    parts += ["", "", ""]
     data = flow["data"]
+    data["penerima"], data["alamat"], data["no_hp"] = parts[0], parts[1], parts[2]
+    data["items"] = items
+    data["ongkir"] = ongkir
+    data["total"] = sum(it["subtotal"] for it in items) + ongkir
+    context.user_data.pop("invoice_flow", None)
 
-    if step == "penerima":
-        data["penerima"] = text
-        flow["step"] = "alamat"
-        await update.message.reply_text("📍 Alamat penerima? (ketik - jika tidak ada)")
-    elif step == "alamat":
-        data["alamat"] = "" if text == "-" else text
-        flow["step"] = "no_hp"
-        await update.message.reply_text("📱 No HP penerima? (ketik - jika tidak ada)")
-    elif step == "no_hp":
-        data["no_hp"] = "" if text == "-" else text
-        flow["step"] = "items"
-        await update.message.reply_text(
-            "🧾 Ketik daftar item, satu baris per item.\n"
-            "Format: nama qty harga (harga boleh dikosongkan jika sudah diatur di ⚙️ Atur HPP)\n\n"
-            "Contoh:\nPaket Topping Matcha 1 65000\nBolu Ketan Hitam S 2\n(baris kedua otomatis pakai Harga Jual dari HPP)"
-        )
-    elif step == "items":
-        items, errors = parse_invoice_items(text)
-        if errors:
-            await update.message.reply_text("\n".join(errors))
-            return
-        if not items:
-            await update.message.reply_text(
-                "⚠️ Format tidak dikenali, coba lagi.\nContoh: Paket Topping Matcha 1 65000"
-            )
-            return
-        data["items"] = items
-        flow["step"] = "ongkir"
-        await update.message.reply_text("🚚 Ongkir berapa? (ketik 0 jika tidak ada)")
-    elif step == "ongkir":
-        ongkir = _to_float(text)
-        data["ongkir"] = ongkir
-        subtotal = sum(it["subtotal"] for it in data["items"])
-        data["total"] = subtotal + ongkir
-        context.user_data.pop("invoice_flow", None)
-
-        pid = stash_pending(context, {"jenis": "invoice", **data})
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Buat Invoice", callback_data=f"invoicemake:{pid}"),
-            InlineKeyboardButton("❌ Batal", callback_data=f"invoicecancel:{pid}"),
-        ]])
-        await update.message.reply_text(
-            format_invoice_preview(data), reply_markup=keyboard, parse_mode="Markdown"
-        )
+    pid = stash_pending(context, {"jenis": "invoice", **data})
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Buat Invoice", callback_data=f"invoicemake:{pid}"),
+        InlineKeyboardButton("❌ Batal", callback_data=f"invoicecancel:{pid}"),
+    ]])
+    await update.message.reply_text(
+        format_invoice_preview(data), reply_markup=keyboard, parse_mode="Markdown"
+    )
 
 
 async def handle_invoice_make(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1258,6 +1310,8 @@ async def handle_invoice_to_transaksi(update: Update, context: ContextTypes.DEFA
         id_transaksi = next_transaksi_id()
         total = _to_float(inv.get("Total", 0))
         penerima = inv.get("Penerima", "")
+        alamat = inv.get("Alamat", "")
+        no_hp = inv.get("No HP", "")
         no = inv.get("No", "")
         items = json.loads(inv.get("Items", "[]") or "[]")
 
@@ -1265,8 +1319,10 @@ async def handle_invoice_to_transaksi(update: Update, context: ContextTypes.DEFA
 
         insert_transaction({
             "jenis": "masuk",
-            "kategori": "",
+            "kategori": "Transaksi",
+            "tipe_produk": "-",
             "keterangan": f"Invoice {no} - {penerima}",
+            "keterangan_full": format_kontak(penerima, alamat, no_hp),
             "total": total,
             "id_transaksi": id_transaksi,
             "profit": total_profit,
@@ -1334,10 +1390,18 @@ async def handle_hpp_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, fl
 
 
 async def start_transaksi(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["transaksi_flow"] = {"step": "keterangan", "data": {}}
+    context.user_data["transaksi_flow"] = {"step": "all", "data": {}}
     await update.message.reply_text(
         "➕ *Input Transaksi Baru*\n\n"
-        "Keterangan/nama pembeli transaksi ini? (ketik /batal untuk membatalkan)",
+        "Kirim dalam satu pesan. Baris pertama nama/alamat/no hp pembeli "
+        "(pisah dengan /, semua opsional), lalu baris item diawali \"-\".\n\n"
+        "Contoh:\n"
+        "Farid / Perum Riung Duta / 081224663400\n"
+        "- bolu ketan hitam L 1 65000\n"
+        "- fudgy brownies mix 2\n\n"
+        "(harga boleh dikosongkan jika sudah diatur di ⚙️ Atur HPP; tambahkan baris "
+        "\"ongkir 10000\" jika ada ongkir)\n\n"
+        "Ketik /batal untuk membatalkan.",
         parse_mode="Markdown",
     )
 
@@ -1349,49 +1413,41 @@ async def handle_transaksi_flow(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("❌ Transaksi dibatalkan.", reply_markup=MAIN_KEYBOARD)
         return
 
-    step = flow["step"]
-    data = flow["data"]
-
-    if step == "keterangan":
-        data["keterangan"] = text
-        flow["step"] = "items"
+    header_lines, items_text, ongkir = split_header_and_items(text)
+    items, errors = parse_invoice_items(items_text)
+    if errors:
+        await update.message.reply_text("\n".join(errors))
+        return
+    if not items:
         await update.message.reply_text(
-            "🧾 Ketik daftar item, satu baris per item.\n"
-            "Format: nama qty harga (harga boleh dikosongkan jika sudah diatur di ⚙️ Atur HPP)\n\n"
-            "Contoh:\nbolu ketan hitam S 2 5000\nfudgy brownies mix 1\n(baris kedua otomatis pakai Harga Jual dari HPP)"
+            "⚠️ Tidak ada item terbaca. Baris item diawali \"-\".\nContoh: - bolu ketan hitam L 1 65000"
         )
-    elif step == "items":
-        items, errors = parse_invoice_items(text)
-        if errors:
-            await update.message.reply_text("\n".join(errors))
-            return
-        if not items:
-            await update.message.reply_text(
-                "⚠️ Format tidak dikenali, coba lagi.\nContoh: bolu ketan hitam S 2 5000"
-            )
-            return
-        data["items"] = items
-        flow["step"] = "ongkir"
-        await update.message.reply_text("🚚 Ongkir berapa? (ketik 0 jika tidak ada)")
-    elif step == "ongkir":
-        ongkir = _to_float(text)
-        data["ongkir"] = ongkir
-        subtotal = sum(it["subtotal"] for it in data["items"])
-        data["total"] = subtotal + ongkir
-        context.user_data.pop("transaksi_flow", None)
+        return
 
-        pid = stash_pending(context, {"jenis": "transaksi_manual", **data})
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Simpan", callback_data=f"trxmake:{pid}"),
-            InlineKeyboardButton("❌ Batal", callback_data=f"trxcancel:{pid}"),
-        ]])
-        lines = [f"❓ *Konfirmasi Transaksi*\n\n📝 {data['keterangan']}", ""]
-        for it in data["items"]:
-            lines.append(f"• {it['nama']} x{it['qty']} — {rupiah(it['subtotal'])}")
-        lines.append("")
-        lines.append(f"🚚 Ongkir: {rupiah(ongkir)}")
-        lines.append(f"💰 *Total: {rupiah(data['total'])}*")
-        await update.message.reply_text("\n".join(lines), reply_markup=keyboard, parse_mode="Markdown")
+    parts = [p.strip() for p in header_lines[0].split("/")] if header_lines else []
+    parts += ["", "", ""]
+    nama, alamat, no_hp = parts[0], parts[1], parts[2]
+
+    data = flow["data"]
+    data["nama"], data["alamat"], data["no_hp"] = nama, alamat, no_hp
+    data["keterangan"] = nama or "Transaksi"
+    data["items"] = items
+    data["ongkir"] = ongkir
+    data["total"] = sum(it["subtotal"] for it in items) + ongkir
+    context.user_data.pop("transaksi_flow", None)
+
+    pid = stash_pending(context, {"jenis": "transaksi_manual", **data})
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Simpan", callback_data=f"trxmake:{pid}"),
+        InlineKeyboardButton("❌ Batal", callback_data=f"trxcancel:{pid}"),
+    ]])
+    lines = [f"❓ *Konfirmasi Transaksi*\n\n📝 {data['keterangan']}", ""]
+    for it in data["items"]:
+        lines.append(f"• {it['nama']} x{it['qty']} — {rupiah(it['subtotal'])}")
+    lines.append("")
+    lines.append(f"🚚 Ongkir: {rupiah(ongkir)}")
+    lines.append(f"💰 *Total: {rupiah(data['total'])}*")
+    await update.message.reply_text("\n".join(lines), reply_markup=keyboard, parse_mode="Markdown")
 
 
 async def handle_transaksi_make(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1407,10 +1463,13 @@ async def handle_transaksi_make(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         id_transaksi = next_transaksi_id()
         total_profit = save_transaksi_items(id_transaksi, "", data["items"])
+        keterangan_full = format_kontak(data.get("nama", ""), data.get("alamat", ""), data.get("no_hp", ""))
         insert_transaction({
             "jenis": "masuk",
-            "kategori": "",
+            "kategori": "Transaksi",
+            "tipe_produk": "-",
             "keterangan": data["keterangan"],
+            "keterangan_full": keterangan_full,
             "total": data["total"],
             "id_transaksi": id_transaksi,
             "profit": total_profit,
