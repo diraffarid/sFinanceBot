@@ -569,9 +569,20 @@ def next_invoice_no(ws) -> str:
     return f"{max(count, 0) + 1:04d}"
 
 
+def next_invoice_id(ws) -> str:
+    """ID Invoice berupa INV-1, INV-2, ... auto-increment berdasarkan ID terbesar yang ada."""
+    max_seq = 0
+    for row in ws.get_all_values()[1:]:
+        if row and row[0].strip().upper().startswith("INV-"):
+            suffix = row[0].strip()[4:]
+            if suffix.isdigit():
+                max_seq = max(max_seq, int(suffix))
+    return f"INV-{max_seq + 1}"
+
+
 def save_invoice_row(data: dict):
     ws = get_worksheet(TAB_INVOICE, HEADERS_INVOICE)
-    id_invoice = uuid.uuid4().hex[:8]
+    id_invoice = next_invoice_id(ws)
     no = next_invoice_no(ws)
     now = datetime.now()
     row = [
@@ -600,13 +611,15 @@ def update_invoice_status(row_idx: int, status: str):
 
 
 def next_transaksi_id() -> str:
-    """ID Transaksi berupa angka auto-increment (mis. 0001, 0002, ...)."""
+    """ID Transaksi berupa TR-1, TR-2, ... auto-increment."""
     ws = get_worksheet(TAB_TRANSAKSI, HEADERS_TRANSAKSI)
-    max_id = 0
+    max_seq = 0
     for row in ws.get_all_values()[1:]:
-        if row and row[0].strip().isdigit():
-            max_id = max(max_id, int(row[0].strip()))
-    return f"{max_id + 1:04d}"
+        if row and row[0].strip().upper().startswith("TR-"):
+            suffix = row[0].strip()[3:]
+            if suffix.isdigit():
+                max_seq = max(max_seq, int(suffix))
+    return f"TR-{max_seq + 1}"
 
 
 def save_transaksi_items(id_transaksi: str, id_invoice: str, items: list) -> float:
